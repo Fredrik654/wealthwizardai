@@ -1,136 +1,97 @@
-import tkinter as tk
-from tkinter import ttk
+import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
+import sqlite3
+import pandas as pd
+import stripe
+from io import BytesIO
 
-class WealthWizard:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("WealthWizard 🪄💰")
-        self.root.geometry("1000x700")
-        self.root.configure(bg="#0d1117")  # Dark mode vibe
+# Stripe setup (replace with your keys in Render environment variables)
+stripe.api_key = st.secrets.get("STRIPE_API_KEY", "sk_test_...")  # Use test key initially
 
-        # Title
-        ttk.Label(root, text="WealthWizard", font=("Helvetica", 28, "bold"), 
-                  foreground="#58a6ff", background="#0d1117").pack(pady=10)
-        ttk.Label(root, text="Slide to see your future riches grow! 🚀", 
-                  font=("Helvetica", 14), foreground="#8b949e", background="#0d1117").pack()
+# DB setup for persistence (SQLite for simplicity; upgrade to PostgreSQL later)
+conn = sqlite3.connect('wealth_wizard.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS users 
+             (user_id TEXT PRIMARY KEY, pay REAL, age INT, risk TEXT, chat_history TEXT)''')
+conn.commit()
 
-        # Input frame
-        input_frame = ttk.Frame(root, padding=20)
-        input_frame.pack(fill="x")
+# Helper: Get/Set user data
+def get_user_data(user_id):
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    return row if row else None
 
-        # Weekly pay
-        ttk.Label(input_frame, text="Weekly Pay ($):", font=("Helvetica", 12)).grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        self.pay_var = tk.DoubleVar(value=1000)
-        pay_entry = ttk.Entry(input_frame, textvariable=self.pay_var, width=12, font=("Helvetica", 12))
-        pay_entry.grid(row=0, column=1, sticky="w")
-        pay_entry.bind("<KeyRelease>", lambda e: self.update())
+def save_user_data(user_id, pay, age, risk, history):
+    c.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?)", 
+              (user_id, pay, age, risk, ','.join(history)))
+    conn.commit()
 
-        # Invest %
-        ttk.Label(input_frame, text="Invest % of pay:", font=("Helvetica", 12)).grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        self.invest_pct = tk.DoubleVar(value=20)
-        self.invest_slider = ttk.Scale(input_frame, from_=0, to=50, orient="horizontal", 
-                                       variable=self.invest_pct, length=300, command=self.update)
-        self.invest_slider.grid(row=1, column=1, columnspan=2, sticky="w", pady=5)
-        self.invest_label = ttk.Label(input_frame, text="20%", font=("Helvetica", 12, "bold"))
-        self.invest_label.grid(row=1, column=3, padx=10, sticky="w")
+# Subscription check (simplified; use webhooks in production)
+def is_subscribed(user_id):
+    try:
+        customers = stripe.Customer.search(query=f'email:"{user_id}"')  # Assuming user_id is email
+        if customers.data:
+            subs = stripe.Subscription.list(customer=customers.data[0].id)
+            return any(sub.status == 'active' for sub in subs.data)
+    except:
+        pass
+    return False  # Default to false
 
-        # Expected return %
-        ttk.Label(input_frame, text="Expected annual return (%):", font=("Helvetica", 12)).grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        self.return_pct = tk.DoubleVar(value=8)
-        self.return_slider = ttk.Scale(input_frame, from_=4, to=15, orient="horizontal", 
-                                       variable=self.return_pct, length=300, command=self.update)
-        self.return_slider.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
-        self.return_label = ttk.Label(input_frame, text="8.0%", font=("Helvetica", 12, "bold"))
-        self.return_label.grid(row=2, column=3, padx=10, sticky="w")
+# Main app
+st.set_page_config(page_title="WealthWizard 🪄", layout="wide")
 
-        # Results area
-        self.result_text = tk.Text(root, height=10, width=60, font=("Helvetica", 11), bg="#161b22", fg="#c9d1d9")
-        self.result_text.pack(pady=15, padx=20, fill="x")
+# Hide Streamlit branding
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display: none !important;}
+    </style>
+    """, unsafe_allow_html=True)
 
-        # Chart
-        self.fig = Figure(figsize=(8, 4), dpi=100, facecolor="#0d1117")
-        self.ax = self.fig.add_subplot(111, facecolor="#161b22")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=root)
-        self.canvas.get_tk_widget().pack(pady=10, fill="both", expand=True)
+# User login (simple; expand with auth lib)
+user_id = st.sidebar.text_input("Enter your email (as user ID):")
+if not user_id:
+    st.warning("Enter your email to start!")
+    st.stop()
 
-        # Initial update
-        self.update()
+subscribed = is_subscribed(user_id)
+if not subscribed:
+    st.sidebar.warning("Subscribe for full chatbot access!")
+    if st.sidebar.button("Subscribe Now ($6.99/mo)"):
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{'price': 'price_...your_price_id', 'quantity': 1}],  # Create in Stripe dashboard
+            mode='subscription',
+            success_url=st.secrets.get("DOMAIN", "http://localhost") + "/?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=st.secrets.get("DOMAIN", "http://localhost"),
+            customer_email=user_id
+        )
+        st.markdown(f"[Pay with Stripe]({session.url})", unsafe_allow_html=True)
+    # Free tier: Basic projection only
+    st.title("WealthWizard Free Tier ✨")
+    pay = st.number_input("Weekly Pay ($)", value=1000.0)
+    invest_pct = st.slider("Invest %", 0, 50, 20) / 100
+    return_pct = st.slider("Expected Return %", 4, 15, 8) / 100
+    weekly_invest = pay * invest_pct
+    st.write(f"Weekly Investment: ${weekly_invest:.2f}")
+    # Add basic projections here if needed (from earlier code)
+else:
+    # Premium: Chatbot mode
+    st.title(f"Welcome back, {user_id}! Your Personal Wealth Coach 🧙‍♂️")
 
-    def update(self, event=None):
-        try:
-            weekly_pay = self.pay_var.get()
-            invest_pct = self.invest_pct.get() / 100
-            annual_return = self.return_pct.get() / 100
+    # Load user data
+    data = get_user_data(user_id)
+    if data:
+        pay, age, risk, history_str = data[1], data[2], data[3], data[4]
+        chat_history = history_str.split(',') if history_str else []
+    else:
+        pay, age, risk, chat_history = 1000.0, 30, "Balanced", []
 
-            # Update slider labels
-            self.invest_label.config(text=f"{self.invest_pct.get():.0f}%")
-            self.return_label.config(text=f"{self.return_pct.get():.1f}%")
-
-            weekly_invest = weekly_pay * invest_pct
-            weekly_fun = weekly_pay - weekly_invest
-
-            # Projections (weekly compounding)
-            years = [1, 5, 10]
-            projections = {}
-            for y in years:
-                n = y * 52
-                r_week = (1 + annual_return) ** (1/52) - 1
-                if r_week == 0:
-                    fv = weekly_invest * n
-                else:
-                    fv = weekly_invest * (( (1 + r_week)**n - 1 ) / r_week)
-                projections[y] = fv
-
-            # Results text
-            self.result_text.delete(1.0, tk.END)
-            self.result_text.insert(tk.END, "🔮 Your Wealth Spell 🔮\n\n")
-            self.result_text.insert(tk.END, f"Weekly Pay:          ${weekly_pay:,.2f}\n")
-            self.result_text.insert(tk.END, f"Investing:           ${weekly_invest:,.2f}  ({invest_pct*100:.0f}%)\n")
-            self.result_text.insert(tk.END, f"Fun / Spend / Debt:  ${weekly_fun:,.2f}\n\n")
-            self.result_text.insert(tk.END, "Future You Projections (at " + f"{annual_return*100:.1f}% avg return):\n")
-            for y in years:
-                msg = f"In {y} years → ${projections[y]:,.0f}  (≈ {projections[y]/weekly_pay:,.0f}x your weekly pay!)\n"
-                self.result_text.insert(tk.END, msg)
-
-            # Chart
-            self.ax.clear()
-            timeline = np.linspace(0, 10, 200)
-            growth = []
-            r_week = (1 + annual_return) ** (1/52) - 1
-            for t in timeline:
-                n = t * 52
-                if r_week == 0:
-                    fv = weekly_invest * n
-                else:
-                    fv = weekly_invest * (( (1 + r_week)**n - 1 ) / r_week)
-                growth.append(fv)
-
-            self.ax.plot(timeline, growth, color='#58a6ff', linewidth=3)
-            self.ax.set_title("Your Growing Empire 📈", color='white', fontsize=14)
-            self.ax.set_xlabel("Years", color='white')
-            self.ax.set_ylabel("Wealth ($)", color='white')
-            self.ax.tick_params(colors='white')
-            self.ax.grid(True, alpha=0.3, color='gray')
-            self.ax.set_facecolor("#161b22")
-            self.fig.set_facecolor("#0d1117")
-
-            # Markers
-            for y in years:
-                val = projections[y]
-                self.ax.plot(y, val, 'o', color='#f78166')
-                self.ax.annotate(f"${val:,.0f}", (y, val*1.05), color='#f78166', ha='center')
-
-            self.canvas.draw()
-
-        except:
-            self.result_text.delete(1.0, tk.END)
-            self.result_text.insert(tk.END, "⚠️ Enter valid numbers!")
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = WealthWizard(root)
-    root.mainloop()
+    # Inputs (persistent)
+    col1, col2 = st.columns(2)
+    with col1:
+        pay = st.number_input("Weekly Pay ($)", value=pay)
+        age =
