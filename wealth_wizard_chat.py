@@ -93,5 +93,5 @@ else:
     # Inputs (persistent)
     col1, col2 = st.columns(2)
     with col1:
-    pay = st.number_input("Weekly Pay ($)", value=pay)
-    age = st.number_input("Age", value=age, min_value=18)
+        pay = st.number_input("Weekly Pay ($)", value=pay)
+        age = st.number_input("Age", value=age, min_value=18)
